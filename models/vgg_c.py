@@ -9,6 +9,7 @@ __all__ = ['vgg19_trans']
 model_urls = {'vgg19': 'https://download.pytorch.org/models/vgg19-dcbb9e9d.pth'}
 
 class VGG_Trans(nn.Module):
+    export = False
     def __init__(self, features):
         super(VGG_Trans, self).__init__()
         self.features = features
@@ -41,12 +42,18 @@ class VGG_Trans(nn.Module):
 
         bs, c, h, w = x.shape
         x = x.flatten(2).permute(2, 0, 1)
-        x, features = self.encoder(x, (h,w))   # transformer
+        if not self.export:
+            x, features = self.encoder(x, (h,w))   # transformer
+        else:
+            x = self.encoder(x, (h,w))
         x = x.permute(1, 2, 0).view(bs, c, h, w)
         #
         x = F.upsample_bilinear(x, size=(rh, rw))
         x = self.reg_layer_0(x)   # regression head
-        return torch.relu(x), features
+        if not self.export:
+            return torch.relu(x), features
+        else:
+            return torch.relu(x)
 
 
 def make_layers(cfg, batch_norm=False):

@@ -8,7 +8,8 @@ from models.module_consistency import LearnableGlobalLocalMultiheadAttention
 
 
 class TransformerEncoder(nn.Module):
-
+    export = False
+    
     def __init__(self, encoder_layer, num_layers, norm=None):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
@@ -23,17 +24,26 @@ class TransformerEncoder(nn.Module):
         features = []
 
         for layer in self.layers:
-            output, consistent_feature = layer(output, shape, src_mask=mask,
+            if not self.export:
+                output, consistent_feature = layer(output, shape, src_mask=mask,
                            src_key_padding_mask=src_key_padding_mask, pos=pos)
-            features.append(consistent_feature)
+                features.append(consistent_feature)
+            else:
+                output = layer(output, shape, src_mask=mask,
+                           src_key_padding_mask=src_key_padding_mask, pos=pos)
+                #output, consistent_feature = layer(output, shape, src_mask=mask,
+                #           src_key_padding_mask=src_key_padding_mask, pos=pos)
 
         if self.norm is not None:
             output = self.norm(output)
 
-        return output, features
+        if self.export:
+            return output
+        else:
+            return output, features
 
 class TransformerEncoderLayer(nn.Module):
-
+    export = False
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False):
         super().__init__()
@@ -62,15 +72,19 @@ class TransformerEncoderLayer(nn.Module):
         q = k = self.with_pos_embed(src, pos)
 
         src2, mask = self.self_attn(q, k, shape, src)
-        feature = torch.squeeze(src, dim=1)
-        consistent_feature = torch.matmul(mask, feature)
+        if not self.export:
+            feature = torch.squeeze(src, dim=1)
+            consistent_feature = torch.matmul(mask, feature)
 
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
         src = src + self.dropout2(src2)
         src = self.norm2(src)
-        return src, consistent_feature
+        if not self.export:
+            return src, consistent_feature
+        else:
+            return src
 
     def forward_pre(self, src, shape,
                     src_mask: Optional[Tensor] = None,
@@ -79,14 +93,17 @@ class TransformerEncoderLayer(nn.Module):
         src2 = self.norm1(src)
         q = k = self.with_pos_embed(src2, pos)
         ssrc2, mask = self.self_attn(q, k, shape, src)
-        feature = torch.squeeze(src, dim=1)
-        consistent_feature = torch.matmul(mask, feature)
+        if not self.export:
+            feature = torch.squeeze(src, dim=1)
+            consistent_feature = torch.matmul(mask, feature)
 
         src = src + self.dropout1(src2)
         src2 = self.norm2(src)
         src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
         src = src + self.dropout2(src2)
-        return src, consistent_feature
+        if not self.export:
+            return src, consistent_feature
+        return src
 
     def forward(self, src, shape,
                 src_mask: Optional[Tensor] = None,

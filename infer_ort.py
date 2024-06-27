@@ -1,15 +1,13 @@
-import torch
 import os
 import numpy as np
-from models.vgg_c import vgg19_trans
 from glob import glob
-from torchvision import transforms
 from PIL import Image
 import argparse
 import cv2
 from shutil import copy
 from loguru import logger
 from vis_utils import MyImgUtil
+import onnxruntime as ort
 
 args = None
 
@@ -21,17 +19,16 @@ def parse_args():
     parser.add_argument('--model-path', default='model/best_model.pth',
                         help='model directory')
     parser.add_argument('--device', default='0', help='assign device')
-    parser.add_argument('--outdir',type=str,default='dump',help='output dir')
+    parser.add_argument('--outdir',type=str,default='weights',help='output dir')
     parser.add_argument('--roi',type=int,nargs='+',default=[],help='roi')
+    #parser.add_argument('--fp16',action='store_true',help='use fp16')
     args = parser.parse_args()
     return args
 
 
 if __name__ == '__main__':
     args = parse_args()
-    os.environ['CUDA_VISIBLE_DEVICES'] = args.device.strip()  # set vis gpu
-    torch.backends.cudnn.benchmark = False
-    save_dir = os.path.dirname(args.model_path)
+    save_dir = args.outdir
    
     painter = MyImgUtil() 
     roi_candi = args.roi
@@ -61,59 +58,67 @@ if __name__ == '__main__':
     if not os.path.exists(save_dir_viz):
         os.makedirs(save_dir_viz)
 
-    trans = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406],
-                             [0.229, 0.224, 0.225])
-    ])
+    #trans = transforms.Compose([
+    #    transforms.ToTensor(),
+    #    transforms.Normalize([0.485, 0.456, 0.406],
+    #                         [0.229, 0.224, 0.225])
+    #])
 
     im_list = glob(os.path.join(args.data_dir, '*.jpg'))
+    sess_opt = ort.SessionOptions()
+    session = ort.InferenceSession(args.model_path, sess_options=sess_opt,
+        providers=[('CUDAExecutionProvider',{'device_id':args.device,'cudnn_conv_use_max_workspace':1}),'CPUExecutionProvider'])
 
-
-    device = torch.device('cuda')
-    model = vgg19_trans()
-    model.to(device)
-    model.load_state_dict(torch.load(args.model_path, device),strict=False)
-    epoch_minus = []
-    num = 0
-    model.eval()
-
+    
+    mean = np.array([0.485, 0.456, 0.406],dtype=np.float32)
+    std = np.array([0.229, 0.224, 0.225],dtype=np.float32)
     export = True
     alpha = 0.5
-    with torch.no_grad():
+    
+    model_input = session.get_inputs()[0]
+    inp_name = model_input.name
+    inp_dtype = model_input.type
+    logger.info(f'inp_name={inp_name}, inp_dtype={inp_dtype}')
+    is_fp16 = 'float16' in inp_dtype    
+
+
+    if True:
         for im_path in im_list:
-            gd_path = im_path.replace('jpg', 'npy')
             #keypoints = np.load(gd_path)
             name = os.path.basename(im_path).split('.')
             # print(name)
             img = Image.open(im_path).convert('RGB')
             img_np = np.array(img)
             h, w = img_np.shape[:2]
-            #if use_roi and (h < y2 or w< x2):
-            #    use_roi = False
-            img = Image.fromarray(img_np)
-            img = trans(img).unsqueeze_(0)
-            inputs = img.to(device)
-            logger.info(f'{name[0]}.{name[1]} im_h={h} im_w={w}')
-            assert inputs.size(0) == 1, 'the batch size should equal to 1'
-            
-            if not export:
-                outputs = model(inputs)[0]
+            if h != 1440 or w != 2560:
+                img_resize = cv2.resize(img_np,(2560,1440), cv2.INTER_LINEAR)
             else:
-                outputs = model(inputs)
+                img_resize = img_np.copy()
+            img_1 = img_resize.astype(np.float32)/255
+            img_1 = (img_1 - mean)/std
+            img_1 = np.transpose(img_1, (2,0,1))
+            img_1 = np.expand_dims(img_1,0) 
+            
+            if is_fp16:
+                img_1 = img_1.astype(np.float16)           
+ 
+            inputs = {inp_name: img_1}
+            outputs = session.run(None, inputs)[0].astype(np.float32)
+
+            
+            
             logger.info(f'outputs.shape={outputs.shape}')
-            #logf = '{}gd_{:.2f}_bpre_{:.2f}.jpg'.format(num, len(keypoints), torch.sum(outputs))
-            #logf = '{}_cnt_{:.2f}.jpg'.format(name[0], torch.sum(outputs))
             logf = '{}.jpg'.format(name[0])
-            num += 1
-            #logf = 'bpre_{:.2f}'.format(torch.sum(outputs))
-            outputs = outputs.detach().cpu().numpy()[0][0]
+            outputs = outputs[0][0]
             logger.info(f'outputs.shape={outputs.shape}')
             #np.save(os.path.join(save_dir_d, name[0]+'.npy'), outputs)
 
-            info = painter.draw_img(img_np, outputs, base=0.1,enhance=1.5,roi=roi)
+            info = painter.draw_img(img_resize, outputs, base=0.1,enhance=1.5,roi=roi)
             logger.info(f'name={name[0]}, total_sum={info["t_sum"]}, roi_sum={info["r_sum"]}')
-            blended = info['img']
+            if h != 1440 or w!=2560:            
+                blended = cv2.resize(info['img'],(w,h),cv2.INTER_LINEAR)
+            else:
+                blended = info['img']
             '''
             # outputs = outputs / np.max(outputs) * 255
             t_sum = np.sum(outputs)
